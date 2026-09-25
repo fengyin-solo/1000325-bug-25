@@ -39,7 +39,7 @@
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in availableActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -47,6 +47,7 @@
             >
               {{ action }}
             </button>
+            <span v-if="!availableActions(row).length" class="muted">已付清，不可改动</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -63,7 +64,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
@@ -71,15 +72,40 @@ type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/settlement'
 const columns = ["结算单号", "结算对象", "结算周期", "上网电量", "电价标准", "应结金额", "已付金额", "结算状态"]
-const actions = ["发起核对", "确认结算", "标记争议"]
-const statuses = ["待核对", "核对中", "已确认", "已付清", "有争议"]
-const stats = [{"label": "待核对结算单", "value": 0}, {"label": "本月结算额", "value": 0}, {"label": "争议单数", "value": 0}]
+// 每个状态允许执行的动作；已付清是终态，不再给任何操作入口
+const ACTIONS_BY_STATUS: Record<string, string[]> = {
+  待核对: ["发起核对", "标记争议"],
+  核对中: ["确认结算", "标记争议"],
+  已确认: ["确认结算", "标记争议"],
+  有争议: ["恢复核对"],
+  已付清: [],
+}
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+// 统计卡片跟着当前列表数据走，保证合计与明细对得上
+const stats = computed(() => [
+  { label: '待核对结算单', value: countByStatus('待核对') },
+  { label: '本月结算额', value: sumField('应结金额') },
+  { label: '争议单数', value: countByStatus('有争议') },
+])
+
+function countByStatus(status: string): number {
+  return rows.value.filter((row) => row['结算状态'] === status).length
+}
+
+function sumField(field: string): number {
+  const sum = rows.value.reduce((acc, row) => acc + (Number(row[field]) || 0), 0)
+  return Number(sum.toFixed(2))
+}
+
+function availableActions(row: Row): string[] {
+  return ACTIONS_BY_STATUS[String(row['结算状态'] ?? '')] ?? []
+}
 
 function resetFilters() {
   filters.value = {}
@@ -99,10 +125,11 @@ async function runAction(action: string, row: Row) {
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('电量结算动作未生效，请稍后重试')
+    const payload = (await response.json().catch(() => null)) as { ok?: boolean; message?: string } | null
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.message || '电量结算动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
